@@ -123,7 +123,7 @@
 <body>
 <header class="hero">
   <div class="scrim"></div>
-  <div class="hbrand"><span class="b1">Figurinhas faltantes</span><span class="b2">Martin · Copa 2026 ⚽</span></div>
+  <div class="hbrand"><span class="b1">Figurinhas faltantes</span><span class="b2">Martin · Copa 2026 ⚽<span id="synced"></span></span></div>
   <div class="hbottom">
     <div class="score">
       <div class="big" id="colado">—<small> / 980 coladas</small></div>
@@ -156,6 +156,9 @@
 </footer>
 <div id="toast"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
+<script src="config.js"></script>
 <script>
 const TEAMS = [
  {g:'A',n:'México',c:'MEX',f:'🇲🇽',m:[9,13,14,15,16,17,20]},
@@ -226,6 +229,7 @@ const Store = {
 };
 
 let got = {};           // { COD: [numeros colados no app] }
+let syncRef = null;
 let view = 'az';
 let query = '';
 let showGot = true;
@@ -236,11 +240,14 @@ const specials = TEAMS.filter(t=>t.g==='★');
 function encodeState(obj){ return btoa(unescape(encodeURIComponent(JSON.stringify(obj)))); }
 function decodeState(str){ try{ return JSON.parse(decodeURIComponent(escape(atob(str)))); }catch(e){ return null; } }
 async function load(){
-  // 1) link com progresso embutido (#s=...) tem prioridade
+  render();                       // mostra a lista IMEDIATO
+  if(initSync()){                 // 1) modo sincronizado (firebase) - tempo real entre aparelhos
+    if(location.hash.indexOf('#s=')===0){ const fh=decodeState(location.hash.slice(3)); if(fh){ for(const c in fh){ (fh[c]||[]).forEach(n=>{ try{ syncRef.child(c+'/'+n).set(true); }catch(e){} }); } try{ history.replaceState(null,'',location.pathname); }catch(e){} } }
+    return;
+  }
+  // 2) fallback local (por aparelho)
   let fromHash = (location.hash.indexOf('#s=')===0) ? decodeState(location.hash.slice(3)) : null;
-  render();                       // mostra a lista IMEDIATO (nunca fica só o header)
   if(fromHash){ got = fromHash; render(); try{ await save(); }catch(e){} try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){} return; }
-  // 2) senao, hidrata do storage do aparelho (com timeout pra nao travar)
   try{
     const raw = await Promise.race([ Store.get(KEY), new Promise(r=>setTimeout(()=>r('__timeout'),1500)) ]);
     if(raw && raw!=='__timeout'){ try{ got = JSON.parse(raw); render(); }catch(e){} }
@@ -253,7 +260,18 @@ async function shareProgress(){
   if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(link).then(()=>toast('Link copiado ✓')).catch(()=>fallbackCopy(link,()=>toast('Link copiado ✓'))); }
   else fallbackCopy(link,()=>toast('Link copiado ✓'));
 }
-async function save(){ await Store.set(KEY, JSON.stringify(got)); }
+async function save(){ if(syncRef) return; await Store.set(KEY, JSON.stringify(got)); }
+function gotFromSnap(v){ const g={}; v=v||{}; for(const c in v){ const a=Object.keys(v[c]||{}).filter(k=>v[c][k]).map(Number); if(a.length) g[c]=a; } return g; }
+function setSyncBadge(on){ const el=document.getElementById('synced'); if(el) el.textContent = on ? ' · ☁ sincronizado' : ''; }
+function initSync(){
+  if(!(window.SYNC_CONFIG && window.firebase)) return false;
+  try{
+    if(!firebase.apps || !firebase.apps.length) firebase.initializeApp(window.SYNC_CONFIG);
+    syncRef = firebase.database().ref('album');
+    syncRef.on('value', s=>{ got = gotFromSnap(s.val()); setSyncBadge(true); render(); }, ()=>{ setSyncBadge(false); });
+    return true;
+  }catch(e){ syncRef=null; setSyncBadge(false); return false; }
+}
 
 function remaining(t){ const g = got[t.c]||[]; return t.m.filter(n=>!g.includes(n)); }
 function totalRemaining(){ return TEAMS.reduce((s,t)=>s+remaining(t).length,0); }
@@ -320,7 +338,8 @@ function tapChip(el){
   const code = el.dataset.c, n = +el.dataset.n;
   if(!got[code]) got[code]=[];
   const i = got[code].indexOf(n);
-  if(i<0){ got[code].push(n); el.classList.add('got','pop'); setTimeout(()=>el.classList.remove('pop'),320); }
+  const willHave = (i<0);
+  if(willHave){ got[code].push(n); el.classList.add('got','pop'); setTimeout(()=>el.classList.remove('pop'),320); }
   else { got[code].splice(i,1); el.classList.remove('got'); }
   // atualiza badge/estado do card sem re-render completo
   const card = el.closest('.card');
@@ -330,7 +349,8 @@ function tapChip(el){
   if(rem.length===0){ card.classList.add('done'); }
   else card.classList.remove('done');
   setProgress();
-  save();
+  if(syncRef){ try{ syncRef.child(code+'/'+n).set(willHave ? true : null); }catch(e){} }
+  else save();
 }
 
 document.getElementById('list').addEventListener('click', e=>{
